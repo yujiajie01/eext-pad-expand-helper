@@ -1062,6 +1062,344 @@ function toStrictSingleContourSource(source: PolygonSource): PolygonSource | und
 	return undefined;
 }
 
+interface XYPoint {
+	x: number;
+	y: number;
+}
+
+function signedAreaOfPoints(points: XYPoint[]): number {
+	if (points.length < 3) {
+		return 0;
+	}
+	let area2 = 0;
+	for (let i = 0; i < points.length; i++) {
+		const a = points[i];
+		const b = points[(i + 1) % points.length];
+		area2 += a.x * b.y - b.x * a.y;
+	}
+	return area2 / 2;
+}
+
+function strictLSourceToClosedPoints(source: PolygonSource): XYPoint[] | undefined {
+	if (source.length < 5) {
+		return undefined;
+	}
+	const pts: XYPoint[] = [];
+	let i = source[0] === 'L' ? 1 : 0;
+	while (i + 1 < source.length) {
+		const x = source[i];
+		const y = source[i + 1];
+		if (typeof x !== 'number' || typeof y !== 'number') {
+			return undefined;
+		}
+		pts.push({ x, y });
+		i += 2;
+	}
+	if (pts.length < 3) {
+		return undefined;
+	}
+	const first = pts[0];
+	const last = pts[pts.length - 1];
+	if (Math.hypot(first.x - last.x, first.y - last.y) <= 1e-7) {
+		pts.pop();
+	}
+	return pts.length >= 3 ? pts : undefined;
+}
+
+function closedPointsToLSource(points: XYPoint[]): PolygonSource | undefined {
+	if (points.length < 3) {
+		return undefined;
+	}
+	const out: PolygonSource = [points[0].x, points[0].y, 'L'];
+	for (let i = 1; i < points.length; i++) {
+		out.push(points[i].x, points[i].y);
+	}
+	return out;
+}
+
+function lineIntersection(
+	p1: XYPoint,
+	d1: XYPoint,
+	p2: XYPoint,
+	d2: XYPoint,
+): XYPoint | undefined {
+	const det = d1.x * d2.y - d1.y * d2.x;
+	if (Math.abs(det) < 1e-12) {
+		return undefined;
+	}
+	const qx = p2.x - p1.x;
+	const qy = p2.y - p1.y;
+	const t = (qx * d2.y - qy * d2.x) / det;
+	return { x: p1.x + t * d1.x, y: p1.y + t * d1.y };
+}
+
+function normalizeVector(v: XYPoint): XYPoint | undefined {
+	const len = Math.hypot(v.x, v.y);
+	if (!(len > 1e-12)) {
+		return undefined;
+	}
+	return { x: v.x / len, y: v.y / len };
+}
+
+function offsetClosedPolylinePoints(points: XYPoint[], offsetMil: number, flipNormal: boolean): XYPoint[] | undefined {
+	const n = points.length;
+	if (n < 3 || !(offsetMil > 0)) {
+		return undefined;
+	}
+	const area = signedAreaOfPoints(points);
+	if (Math.abs(area) < 1e-9) {
+		return undefined;
+	}
+	const orient = area > 0 ? 1 : -1;
+	const side = flipNormal ? -1 : 1;
+	const vertices: XYPoint[] = [];
+	const edgeDirs: XYPoint[] = Array.from({ length: n }, () => ({ x: 0, y: 0 }));
+	const edgeNormals: XYPoint[] = Array.from({ length: n }, () => ({ x: 0, y: 0 }));
+	for (let i = 0; i < n; i++) {
+		const a = points[i];
+		const b = points[(i + 1) % n];
+		const dir = normalizeVector({ x: b.x - a.x, y: b.y - a.y });
+		if (!dir) {
+			return undefined;
+		}
+		edgeDirs[i] = dir;
+		// y 轴向上坐标系：CCW 轮廓外法线为右法线；CW 外法线为左法线
+		const outward = orient > 0
+			? { x: dir.y, y: -dir.x }
+			: { x: -dir.y, y: dir.x };
+		edgeNormals[i] = {
+			x: outward.x * side,
+			y: outward.y * side,
+		};
+	}
+	const maxMiter = Math.max(offsetMil * 8, offsetMil + 1e-6);
+	for (let i = 0; i < n; i++) {
+		const prev = (i - 1 + n) % n;
+		const currPoint = points[i];
+		const prevPoint = points[prev];
+		const prevDir = edgeDirs[prev];
+		const currDir = edgeDirs[i];
+		const prevNormal = edgeNormals[prev];
+		const currNormal = edgeNormals[i];
+		const line1Point = {
+			x: prevPoint.x + prevNormal.x * offsetMil,
+			y: prevPoint.y + prevNormal.y * offsetMil,
+		};
+		const line2Point = {
+			x: currPoint.x + currNormal.x * offsetMil,
+			y: currPoint.y + currNormal.y * offsetMil,
+		};
+		let p = lineIntersection(line1Point, prevDir, line2Point, currDir);
+		if (!p) {
+			const merged = normalizeVector({
+				x: prevNormal.x + currNormal.x,
+				y: prevNormal.y + currNormal.y,
+			});
+			if (merged) {
+				p = {
+					x: currPoint.x + merged.x * offsetMil,
+					y: currPoint.y + merged.y * offsetMil,
+				};
+			}
+			else {
+				p = {
+					x: currPoint.x + currNormal.x * offsetMil,
+					y: currPoint.y + currNormal.y * offsetMil,
+				};
+			}
+		}
+		const dx = p.x - currPoint.x;
+		const dy = p.y - currPoint.y;
+		const miterLen = Math.hypot(dx, dy);
+		if (miterLen > maxMiter) {
+			const dir = normalizeVector({ x: dx, y: dy });
+			if (dir) {
+				p = {
+					x: currPoint.x + dir.x * maxMiter,
+					y: currPoint.y + dir.y * maxMiter,
+				};
+			}
+		}
+		vertices.push(p);
+	}
+	// 去除极近重复顶点，避免宿主几何器崩溃
+	const simplified: XYPoint[] = [];
+	for (const pt of vertices) {
+		const prev = simplified[simplified.length - 1];
+		if (!prev || Math.hypot(prev.x - pt.x, prev.y - pt.y) > 1e-6) {
+			simplified.push(pt);
+		}
+	}
+	if (simplified.length >= 3 && Math.hypot(
+		simplified[0].x - simplified[simplified.length - 1].x,
+		simplified[0].y - simplified[simplified.length - 1].y,
+	) <= 1e-6) {
+		simplified.pop();
+	}
+	return simplified.length >= 3 ? simplified : undefined;
+}
+
+function offsetPolygonSourceFixedDistance(inner: PolygonSource, expMil: number): PolygonSource | undefined {
+	if (!(expMil > 0)) {
+		return inner;
+	}
+	const strict = toStrictSingleContourSource(inner) ?? inner;
+	const points = strictLSourceToClosedPoints(strict);
+	if (!points) {
+		return undefined;
+	}
+	const candidates = [
+		offsetClosedPolylinePoints(points, expMil, false),
+		offsetClosedPolylinePoints(points, expMil, true),
+	].filter((v): v is XYPoint[] => Array.isArray(v) && v.length >= 3);
+	if (candidates.length === 0) {
+		return undefined;
+	}
+	const innerArea = Math.abs(signedAreaOfPoints(points));
+	let best = candidates[0];
+	let bestGain = Math.abs(signedAreaOfPoints(best)) - innerArea;
+	for (let i = 1; i < candidates.length; i++) {
+		const gain = Math.abs(signedAreaOfPoints(candidates[i])) - innerArea;
+		if (gain > bestGain) {
+			bestGain = gain;
+			best = candidates[i];
+		}
+	}
+	return closedPointsToLSource(best);
+}
+
+function ensurePointsOrientation(points: XYPoint[], clockwise: boolean): XYPoint[] {
+	const area = signedAreaOfPoints(points);
+	const isCw = area < 0;
+	if (clockwise === isCw) {
+		return points;
+	}
+	return [...points].reverse();
+}
+
+function estimateSourceAreaAbsSimple(source: PolygonSource): number {
+	const pts = strictLSourceToClosedPoints(source);
+	if (!pts || pts.length < 3) {
+		return 0;
+	}
+	return Math.abs(signedAreaOfPoints(pts));
+}
+
+function pickLargestPolygonSource(polys: IPCB_Polygon[]): PolygonSource | undefined {
+	if (polys.length === 0) {
+		return undefined;
+	}
+	let best: PolygonSource | undefined;
+	let bestArea = -1;
+	for (const p of polys) {
+		const src = p.getSource() as PolygonSource;
+		const strict = toStrictSingleContourSource(src) ?? src;
+		const area = estimateSourceAreaAbsSimple(strict);
+		if (area > bestArea) {
+			bestArea = area;
+			best = strict;
+		}
+	}
+	return best;
+}
+
+function normalizeComplexSources(src: unknown): PolygonSource[] {
+	if (!Array.isArray(src) || src.length === 0) {
+		return [];
+	}
+	if (Array.isArray(src[0])) {
+		return src as PolygonSource[];
+	}
+	return [src as PolygonSource];
+}
+
+/**
+ * 对可能自交/退化的外轮廓做正规化：借助 ComplexPolygon 的 nonzero 规则消解异常段，
+ * 然后取面积最大的单轮廓作为最终 outer。
+ */
+function normalizeOuterContourByComplex(outer: PolygonSource): PolygonSource | undefined {
+	const strict = toStrictSingleContourSource(outer) ?? outer;
+	const complex = eda.pcb_MathPolygon.createComplexPolygon(strict);
+	if (!complex) {
+		return strict;
+	}
+	let contourList: PolygonSource[] = [];
+	if ('getSourceStrictComplex' in complex && typeof complex.getSourceStrictComplex === 'function') {
+		contourList = normalizeComplexSources(complex.getSourceStrictComplex());
+	}
+	if (contourList.length === 0 && 'getSource' in complex && typeof complex.getSource === 'function') {
+		contourList = normalizeComplexSources(complex.getSource());
+	}
+	if (contourList.length === 0) {
+		return strict;
+	}
+	let best = contourList[0];
+	let bestArea = estimateSourceAreaAbsSimple(toStrictSingleContourSource(best) ?? best);
+	for (let i = 1; i < contourList.length; i++) {
+		const cand = toStrictSingleContourSource(contourList[i]) ?? contourList[i];
+		const area = estimateSourceAreaAbsSimple(cand);
+		if (area > bestArea) {
+			bestArea = area;
+			best = cand;
+		}
+	}
+	return toStrictSingleContourSource(best) ?? best;
+}
+
+/**
+ * 稳定外扩：将「原轮廓 + 边条带 + 顶点圆盘」作为复杂多边形并集近似，
+ * 再拆分并取最大外轮廓。对凹角比“顶点交点法”更稳健。
+ */
+function buildDilatedOuterByStrokeUnion(inner: PolygonSource, expMil: number): PolygonSource | undefined {
+	if (!(expMil > 0)) {
+		return inner;
+	}
+	const strict = toStrictSingleContourSource(inner) ?? inner;
+	const ptsRaw = strictLSourceToClosedPoints(strict);
+	if (!ptsRaw || ptsRaw.length < 3) {
+		return undefined;
+	}
+	const clockwise = signedAreaOfPoints(ptsRaw) < 0;
+	const pts = ensurePointsOrientation(ptsRaw, clockwise);
+	const shapes: PolygonSource[] = [strict];
+	for (let i = 0; i < pts.length; i++) {
+		const a = pts[i];
+		const b = pts[(i + 1) % pts.length];
+		const dx = b.x - a.x;
+		const dy = b.y - a.y;
+		const len = Math.hypot(dx, dy);
+		if (!(len > 1e-6)) {
+			continue;
+		}
+		const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+		// 边条带：沿边方向略加长，避免端点缝隙。
+		const stripW = len + expMil * 2;
+		const stripH = expMil * 2;
+		const centerX = (a.x + b.x) / 2;
+		const centerY = (a.y + b.y) / 2;
+		const tl = rectTopLeftFromCenter(centerX, centerY, stripW, stripH, angle);
+		shapes.push(['R', tl.x, tl.y, stripW, stripH, angle, 0] as PolygonSource);
+		shapes.push(circlePolygonSource(a.x, a.y, expMil));
+	}
+	const complex = eda.pcb_MathPolygon.createComplexPolygon(shapes);
+	if (!complex) {
+		return undefined;
+	}
+	const split = eda.pcb_MathPolygon.splitPolygon(complex);
+	if (!Array.isArray(split) || split.length === 0) {
+		return undefined;
+	}
+	const largest = pickLargestPolygonSource(split);
+	if (!largest) {
+		return undefined;
+	}
+	const largestPts = strictLSourceToClosedPoints(largest);
+	if (!largestPts) {
+		return largest;
+	}
+	return closedPointsToLSource(ensurePointsOrientation(largestPts, clockwise));
+}
+
 function transformPolygonSourceToWorld(
 	source: PolygonSource,
 	localCenter: { x: number; y: number },
@@ -1171,23 +1509,37 @@ function buildPolygonPadOuterInnerContours(
 	const picked = worldPair.score <= localPair.score ? { mode: 'world', ...worldPair } : { mode: 'local', ...localPair };
 	padExpDebugLog('polygon-space-select', { worldScore: worldPair.score, localScore: localPair.score, picked: picked.mode });
 	padExpDebugToastForce(`space=${picked.mode}, ws=${worldPair.score.toFixed(1)}, ls=${localPair.score.toFixed(1)}`);
-	const outer = picked.outer;
 	const inner = picked.inner;
-	if (!outer || !inner) {
-		padExpDebugLog('polygon-transform-failed', { hasOuter: Boolean(outer), hasInner: Boolean(inner), scale });
+	if (!inner) {
+		padExpDebugLog('polygon-transform-failed', { hasInner: Boolean(inner), scale });
 		padExpDebugToastForce(`transform failed: scale=${scale.toFixed(4)}`);
 		return undefined;
 	}
-	padExpDebugLog('polygon-transform-ok', { scale, outerLen: outer.length, innerLen: inner.length });
+	let outer = offsetPolygonSourceFixedDistance(inner, expMil);
+	if (!outer) {
+		outer = buildDilatedOuterByStrokeUnion(inner, expMil);
+	}
+	if (outer) {
+		outer = normalizeOuterContourByComplex(outer) ?? outer;
+	}
+	if (!outer) {
+		// 兜底：避免回退到旧的 picked.outer（历史缩放结果），否则会出现“改了算法但效果不变”。
+		outer = scalePolygonSourceAroundCenter(inner, expMil);
+	}
+	if (!outer) {
+		padExpDebugLog('polygon-offset-failed', { expMil, innerLen: inner.length });
+		return undefined;
+	}
+	padExpDebugLog('polygon-transform-ok', { scale, outerLen: outer.length, innerLen: inner.length, offsetMode: 'fixed-distance' });
 	const ob = getPolygonSourceBBox(outer);
 	const ib = getPolygonSourceBBox(inner);
 	if (ob && ib) {
-		const gx = Math.min(ob.minX - ib.minX, ib.maxX - ob.maxX);
-		const gy = Math.min(ob.minY - ib.minY, ib.maxY - ob.maxY);
+		const gx = Math.min(ib.minX - ob.minX, ob.maxX - ib.maxX);
+		const gy = Math.min(ib.minY - ob.minY, ob.maxY - ib.maxY);
 		const minGrow = Math.min(gx, gy);
 		padExpDebugLog('polygon-grow-check', { gx, gy, minGrow, expMil });
-		// 文档定义单多边形会自动闭合；若外扩量明显不足，保形兜底（对原轮廓再做中心缩放补偿）。
-		if (!(minGrow > Math.max(0.1, expMil * 0.3))) {
+		// 仅当外扩显著错误（明显内缩/塌陷）时才回退，避免覆盖固定距离偏移结果。
+		if (minGrow < -Math.max(0.1, expMil * 0.2)) {
 			const shapeOuter = scalePolygonSourceAroundCenter(inner, expMil);
 			if (shapeOuter) {
 				padExpDebugToastForce(`grow fallback: shape-scale (${expMil})`);
