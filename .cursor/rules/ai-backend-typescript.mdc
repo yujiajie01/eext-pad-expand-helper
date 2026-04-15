@@ -1,0 +1,128 @@
+---
+description: 
+alwaysApply: true
+---
+
+# AI助手后端开发规范
+
+## 技术栈要求
+- **运行时**: Node.js + TypeScript
+- **包管理**: 使用 bun（不要用 npm）
+- **框架**: Express/Fastify/NestJS
+- **语言**: 必须用中文-simplified回复
+
+## Token 管理规范
+
+### Token 统计
+```typescript
+// ✅ 每次调用记录 token 使用量
+interface TokenUsage {
+  userId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  timestamp: Date;
+}
+
+// ✅ 使用拦截器/中间件统一记录
+async function recordTokenUsage(usage: TokenUsage) {
+  await tokenRepository.save(usage);
+}
+```
+
+### Token 管控
+- 实现用户级 token 配额限制
+- 支持按模型差异化计费
+- 提供实时用量查询接口
+- 超限返回友好提示（429 + 重置时间）
+
+## 大模型 API 对接规范
+
+### 接口封装
+```typescript
+// ✅ 统一模型接口抽象
+interface LLMProvider {
+  chat(messages: Message[], options?: RequestOptions): Promise<ChatResponse>;
+  streamChat(messages: Message[], handler: StreamHandler): Promise<void>;
+  countTokens(text: string): number;
+}
+
+// ✅ 支持多厂商切换
+class OpenAIProvider implements LLMProvider { }
+class ClaudeProvider implements LLMProvider { }
+class QwenProvider implements LLMProvider { }
+```
+
+### 错误处理
+- 封装模型特有错误码
+- 实现指数退避重试机制
+- 记录详细错误日志
+
+## Agent 编排规范
+
+### 文生原理图 Agent
+```typescript
+// ✅ 定义清晰的 Agent 步骤
+interface SchematicAgent {
+  // 1. 需求解析
+  parseRequirements(userInput: string): Requirement[];
+  // 2. 元件选型
+  selectComponents(requirements: Requirement[]): Component[];
+  // 3. 电路设计
+  designCircuit(components: Component[]): CircuitGraph;
+  // 4. 输出生成
+  generateOutput(circuit: CircuitGraph): SchematicFile;
+}
+```
+
+### 原理图布局 Agent
+```typescript
+// ✅ 布局优化 Agent 步骤
+interface LayoutAgent {
+  // 1. 解析电路图
+  parseCircuit(schematic: SchematicFile): CircuitGraph;
+  // 2. 元件布局
+  placeComponents(circuit: CircuitGraph): LayoutResult;
+  // 3. 布线优化
+  routeConnections(layout: LayoutResult): RoutedLayout;
+  // 4. 输出布局文件
+  generateOutput(layout: RoutedLayout): LayoutFile;
+}
+```
+
+### Agent 状态管理
+- 使用状态机管理 Agent 生命周期
+- 每个步骤支持取消/重试
+- 记录中间状态便于调试
+
+## 多用户并发规范
+
+### 记忆隔离
+```typescript
+// ✅ 用户级会话隔离
+interface UserSession {
+  userId: string;
+  sessionId: string;
+  memory: ConversationMemory;
+  lock: AsyncLock; // 防止并发冲突
+}
+
+// ✅ 会话存储策略
+class SessionManager {
+  getSession(userId: string): Promise<UserSession>;
+  releaseSession(session: UserSession): Promise<void>;
+  cleanupExpired(ttl: number): Promise<void>;
+}
+```
+
+### 并发控制
+- 使用连接池管理模型 API 连接
+- 实现请求队列防止过载
+- 关键操作加分布式锁
+
+## 代码规范
+- 所有接口返回统一格式 `{ code, data, message }`
+- 异步函数必须加 `try-catch` 或返回 `Promise`
+- 复杂类型用 `interface` 定义，避免 `any`
+- 错误日志必须包含上下文（userId、traceId）

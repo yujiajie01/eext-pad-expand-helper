@@ -1173,6 +1173,17 @@ function offsetClosedPolylinePoints(points: XYPoint[], offsetMil: number, flipNo
 		};
 	}
 	const maxMiter = Math.max(offsetMil * 8, offsetMil + 1e-6);
+
+	// 辅助函数：判断是否为凹角（内角 > 180°）
+	// 通过两条边方向向量的叉积来判断转向
+	const isReflexAngle = (prevDir: XYPoint, currDir: XYPoint): boolean => {
+		// 叉积 z 分量 = prevDir.x * currDir.y - prevDir.y * currDir.x
+		const crossZ = prevDir.x * currDir.y - prevDir.y * currDir.x;
+		// 对于顺时针轮廓（orient < 0），凹角的叉积 > 0
+		// 对于逆时针轮廓（orient > 0），凹角的叉积 < 0
+		return orient * crossZ < -1e-9;
+	};
+
 	for (let i = 0; i < n; i++) {
 		const prev = (i - 1 + n) % n;
 		const currPoint = points[i];
@@ -1181,6 +1192,10 @@ function offsetClosedPolylinePoints(points: XYPoint[], offsetMil: number, flipNo
 		const currDir = edgeDirs[i];
 		const prevNormal = edgeNormals[prev];
 		const currNormal = edgeNormals[i];
+
+		// 检测凹角
+		const isConcave = isReflexAngle(prevDir, currDir);
+
 		const line1Point = {
 			x: prevPoint.x + prevNormal.x * offsetMil,
 			y: prevPoint.y + prevNormal.y * offsetMil,
@@ -1190,6 +1205,31 @@ function offsetClosedPolylinePoints(points: XYPoint[], offsetMil: number, flipNo
 			y: currPoint.y + currNormal.y * offsetMil,
 		};
 		let p = lineIntersection(line1Point, prevDir, line2Point, currDir);
+
+		// 凹角处理 case：使用圆角过渡代替尖角斜接
+		if (isConcave || !p) {
+			// 对于凹角，使用圆弧采样来平滑过渡
+			// 计算两条法线之间的夹角
+			const dot = prevNormal.x * currNormal.x + prevNormal.y * currNormal.y;
+			const angleBetween = Math.acos(Math.max(-1, Math.min(1, dot)));
+
+			if (angleBetween > 0.01 && angleBetween < Math.PI - 0.01) {
+				// 在凹角处插入圆弧采样点（简化处理：使用合并法线方向）
+				const merged = normalizeVector({
+					x: prevNormal.x + currNormal.x,
+					y: prevNormal.y + currNormal.y,
+				});
+				if (merged) {
+					// 凹角处缩短偏移距离，避免自交
+					const concaveOffset = offsetMil * 0.5;
+					p = {
+						x: currPoint.x + merged.x * concaveOffset,
+						y: currPoint.y + merged.y * concaveOffset,
+					};
+				}
+			}
+		}
+
 		if (!p) {
 			const merged = normalizeVector({
 				x: prevNormal.x + currNormal.x,
@@ -1208,18 +1248,23 @@ function offsetClosedPolylinePoints(points: XYPoint[], offsetMil: number, flipNo
 				};
 			}
 		}
-		const dx = p.x - currPoint.x;
-		const dy = p.y - currPoint.y;
-		const miterLen = Math.hypot(dx, dy);
-		if (miterLen > maxMiter) {
-			const dir = normalizeVector({ x: dx, y: dy });
-			if (dir) {
-				p = {
-					x: currPoint.x + dir.x * maxMiter,
-					y: currPoint.y + dir.y * maxMiter,
-				};
+
+		// 凸角斜接限制（凹角已经缩短了偏移距离）
+		if (!isConcave) {
+			const dx = p.x - currPoint.x;
+			const dy = p.y - currPoint.y;
+			const miterLen = Math.hypot(dx, dy);
+			if (miterLen > maxMiter) {
+				const dir = normalizeVector({ x: dx, y: dy });
+				if (dir) {
+					p = {
+						x: currPoint.x + dir.x * maxMiter,
+						y: currPoint.y + dir.y * maxMiter,
+					};
+				}
 			}
 		}
+
 		vertices.push(p);
 	}
 	// 去除极近重复顶点，避免宿主几何器崩溃
@@ -1524,7 +1569,9 @@ function buildPolygonPadOuterInnerContours(
 	}
 	if (!outer) {
 		// 兜底：避免回退到旧的 picked.outer（历史缩放结果），否则会出现“改了算法但效果不变”。
-		outer = scalePolygonSourceAroundCenter(inner, expMil);
+		// 兜底：使用条带并集算法，比 scalePolygonSourceAroundCenter 更稳健
+		// scalePolygonSourceAroundCenter 使用各向异性缩放会导致形状失真（圆变椭圆）
+		outer = buildDilatedOuterByStrokeUnion(inner, expMil);
 	}
 	if (!outer) {
 		padExpDebugLog('polygon-offset-failed', { expMil, innerLen: inner.length });
@@ -1540,9 +1587,10 @@ function buildPolygonPadOuterInnerContours(
 		padExpDebugLog('polygon-grow-check', { gx, gy, minGrow, expMil });
 		// 仅当外扩显著错误（明显内缩/塌陷）时才回退，避免覆盖固定距离偏移结果。
 		if (minGrow < -Math.max(0.1, expMil * 0.2)) {
-			const shapeOuter = scalePolygonSourceAroundCenter(inner, expMil);
+			// 使用条带并集算法替代有问题的缩放算法
+			const shapeOuter = buildDilatedOuterByStrokeUnion(inner, expMil);
 			if (shapeOuter) {
-				padExpDebugToastForce(`grow fallback: shape-scale (${expMil})`);
+				padExpDebugToastForce(`grow fallback: stroke-union (${expMil})`);
 				return { outer: shapeOuter, inner };
 			}
 		}
