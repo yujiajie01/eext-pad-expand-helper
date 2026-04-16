@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-Hans">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>焊盘外扩 · 对话</title>
+		<style>
+			:root {
+				--bg: #f1f5f9;
+				--card: #fff;
+				--border: #e2e8f0;
+				--accent: #2563eb;
+				--muted: #64748b;
+			}
+			* {
+				box-sizing: border-box;
+			}
+			html,
+			body {
+				margin: 0;
+				height: 100%;
+				overflow: hidden;
+				font:
+					13px/1.5 system-ui,
+					-apple-system,
+					'Segoe UI',
+					Roboto,
+					'PingFang SC',
+					'Microsoft YaHei',
+					sans-serif;
+				background: var(--bg);
+			}
+			body {
+				display: flex;
+				flex-direction: column;
+			}
+			#status {
+				font-size: 11px;
+				color: var(--muted);
+				padding: 8px 12px 4px;
+			}
+			#scroll {
+				flex: 1;
+				overflow: auto;
+				padding: 8px 12px 12px;
+			}
+			.msg {
+				margin-bottom: 10px;
+				padding: 10px 12px;
+				border-radius: 10px;
+				max-width: 96%;
+				white-space: pre-wrap;
+				word-break: break-word;
+			}
+			.msg.user {
+				background: #dbeafe;
+				margin-left: auto;
+				text-align: left;
+			}
+			.msg.assistant {
+				background: var(--card);
+				border: 1px solid var(--border);
+			}
+			.msg.stream {
+				opacity: 0.92;
+				border-style: dashed;
+			}
+			#bar {
+				display: flex;
+				gap: 8px;
+				padding: 10px 12px;
+				border-top: 1px solid var(--border);
+				background: var(--card);
+			}
+			#inp {
+				flex: 1;
+				min-height: 44px;
+				padding: 8px 10px;
+				border: 1px solid #cbd5e1;
+				border-radius: 8px;
+				resize: vertical;
+				font: inherit;
+			}
+			#send {
+				padding: 0 14px;
+				border-radius: 8px;
+				background: var(--accent);
+				color: #fff;
+				border: none;
+				cursor: pointer;
+				font-weight: 600;
+			}
+			#send:disabled {
+				opacity: 0.45;
+				cursor: not-allowed;
+			}
+		</style>
+	</head>
+	<body>
+		<div id="status">连接中…</div>
+		<div id="scroll"></div>
+		<div id="bar">
+			<textarea id="inp" rows="2" placeholder="描述需求，例如：阻焊区域，外扩 0.1mm，连续生成。完成后可回复「确认」。"></textarea>
+			<button type="button" id="send">发送</button>
+		</div>
+		<script>
+			(function () {
+				var KEY = 'pad-expand-helper:agent-chat';
+				function readRaw() {
+					try {
+						if (typeof eda !== 'undefined' && eda.sys_Storage && eda.sys_Storage.getExtensionUserConfig) {
+							var v = eda.sys_Storage.getExtensionUserConfig(KEY);
+							if (v !== undefined && v !== null) {
+								return typeof v === 'string' ? v : JSON.stringify(v);
+							}
+						}
+					} catch (e) {}
+					try {
+						if (typeof sessionStorage !== 'undefined') {
+							return sessionStorage.getItem(KEY);
+						}
+					} catch (e2) {}
+					return null;
+				}
+				function writeSync(obj) {
+					var s = JSON.stringify(obj);
+					try {
+						sessionStorage.setItem(KEY, s);
+					} catch (e) {}
+					if (typeof eda !== 'undefined' && eda.sys_Storage && eda.sys_Storage.setExtensionUserConfig) {
+						try {
+							eda.sys_Storage.setExtensionUserConfig(KEY, s);
+						} catch (e) {}
+					}
+				}
+				function readState() {
+					var raw = readRaw();
+					if (!raw || raw === '') {
+						return { seq: 0, messages: [], streaming: '', phase: 'connecting' };
+					}
+					try {
+						return JSON.parse(raw);
+					} catch (e) {
+						return { seq: 0, messages: [], streaming: '', phase: 'connecting' };
+					}
+				}
+				var scroll = document.getElementById('scroll');
+				var statusEl = document.getElementById('status');
+				var inp = document.getElementById('inp');
+				var sendBtn = document.getElementById('send');
+				function render() {
+					var st = readState();
+					var phase = st.phase || '';
+					var line =
+						phase === 'connecting'
+							? '连接中…'
+							: phase === 'streaming'
+								? '助手正在输出…'
+								: phase === 'error'
+									? '错误：' + (st.error || '')
+									: '输入后发送；参数齐后回复「确认」。';
+					statusEl.textContent = line;
+					scroll.innerHTML = '';
+					var msgs = Array.isArray(st.messages) ? st.messages : [];
+					for (var i = 0; i < msgs.length; i++) {
+						var m = msgs[i];
+						var d = document.createElement('div');
+						d.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+						d.textContent = m.text || '';
+						scroll.appendChild(d);
+					}
+					if (st.streaming) {
+						var sd = document.createElement('div');
+						sd.className = 'msg assistant stream';
+						sd.textContent = st.streaming;
+						scroll.appendChild(sd);
+					}
+					scroll.scrollTop = scroll.scrollHeight;
+					var busy = phase === 'connecting' || phase === 'streaming';
+					sendBtn.disabled = !!busy;
+					inp.disabled = !!busy;
+				}
+				function send() {
+					var t = String(inp.value || '').trim();
+					if (!t) {
+						return;
+					}
+					var st = readState();
+					st.pendingUser = t;
+					st.pendingUserId = Date.now();
+					writeSync(st);
+					inp.value = '';
+				}
+				sendBtn.addEventListener('click', send);
+				inp.addEventListener('keydown', function (e) {
+					if (e.key === 'Enter' && !e.shiftKey) {
+						e.preventDefault();
+						send();
+					}
+				});
+				/** 用户关闭 iframe/页签时通知扩展，避免仅靠轮询误判 */
+				window.addEventListener('pagehide', function () {
+					var st = readState();
+					st.cancelled = true;
+					writeSync(st);
+				});
+				setInterval(render, 100);
+				render();
+			})();
+		</script>
+	</body>
+</html>

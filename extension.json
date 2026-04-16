@@ -3,7 +3,7 @@
 	"uuid": "23d6d62d80c44cc28c5c608ac3126f32",
 	"displayName": "焊盘外扩助手",
 	"description": "按焊盘生成阻焊外扩：禁止区域（禁止铺铜/填充）或阻焊层图形；支持连续点选与多选。英文菜单名 pad-expand-helper。",
-	"version": "1.0.4",
+	"version": "1.0.12",
 	"publisher": "",
 	"engines": {
 		"eda": "^3.0.0"

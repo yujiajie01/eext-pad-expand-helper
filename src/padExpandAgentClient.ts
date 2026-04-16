@@ -1,6 +1,5 @@
 /**
- * 与本地 pad-expand-agent-mvp（LangGraph）HTTP 服务通信。
- * 默认：http://127.0.0.1:8787
+ * 与 pad-expand-agent-mvp 通信：HTTP + `application/json`，请求头 `X-Agent-Key`。
  */
 
 export type PadExpandAgentStatus = 'collecting' | 'confirming' | 'completed' | 'error';
@@ -29,40 +28,89 @@ function trimBaseUrl(baseUrl: string): string {
 	return baseUrl.trim().replace(/\/$/, '');
 }
 
-export async function chatStart(baseUrl: string): Promise<ChatStartResponse> {
+export type PostJsonFn = (url: string, jsonBody: string) => Promise<Response>;
+
+function throwHttpJsonError(res: Response, bodyText: string): never {
+	let parsed: { error?: unknown };
+	try {
+		parsed = JSON.parse(bodyText) as { error?: unknown };
+	}
+	catch {
+		throw new Error(`HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 800)}` : ''}`);
+	}
+	if (typeof parsed.error === 'string') {
+		throw new TypeError(parsed.error);
+	}
+	throw new Error(`HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 800)}` : ''}`);
+}
+
+export async function chatStart(
+	baseUrl: string,
+	postJson: PostJsonFn,
+	onDelta?: (chunk: string) => void,
+): Promise<ChatStartResponse> {
 	const url = `${trimBaseUrl(baseUrl)}/chat/start`;
-	const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+	const res = await postJson(url, '{}');
+	const text = await res.text();
 	if (!res.ok) {
-		const text = await res.text().catch(() => '');
-		throw new Error(`chat/start ${res.status}${text ? `: ${text}` : ''}`);
+		throwHttpJsonError(res, text);
 	}
-	const data = (await res.json()) as { sessionId?: string; reply?: string };
-	if (!data.sessionId || typeof data.reply !== 'string') {
-		throw new Error('chat/start: 响应缺少 sessionId 或 reply');
+	let data: Record<string, unknown>;
+	try {
+		data = JSON.parse(text) as Record<string, unknown>;
 	}
-	return { sessionId: data.sessionId, reply: data.reply };
+	catch {
+		throw new Error('chat/start: 响应非 JSON');
+	}
+	const sessionId = data.sessionId;
+	const reply = data.reply;
+	if (typeof sessionId !== 'string' || typeof reply !== 'string') {
+		throw new TypeError('chat/start: 缺少 sessionId 或 reply');
+	}
+	if (onDelta) {
+		onDelta(reply);
+	}
+	return { sessionId, reply };
 }
 
 export async function chatTurn(
 	baseUrl: string,
 	sessionId: string,
 	input: string,
+	postJson: PostJsonFn,
+	onDelta?: (chunk: string) => void,
 ): Promise<ChatTurnResponse> {
 	const url = `${trimBaseUrl(baseUrl)}/chat/turn`;
-	const res = await fetch(url, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ sessionId, input }),
-	});
+	const res = await postJson(url, JSON.stringify({ sessionId, input }));
+	const text = await res.text();
 	if (!res.ok) {
-		const text = await res.text().catch(() => '');
-		throw new Error(`chat/turn ${res.status}${text ? `: ${text}` : ''}`);
+		throwHttpJsonError(res, text);
 	}
-	const data = (await res.json()) as ChatTurnResponse;
-	if (!data.sessionId || typeof data.reply !== 'string' || typeof data.status !== 'string') {
-		throw new Error('chat/turn: 响应格式异常');
+	let data: Record<string, unknown>;
+	try {
+		data = JSON.parse(text) as Record<string, unknown>;
 	}
-	return data;
+	catch {
+		throw new Error('chat/turn: 响应非 JSON');
+	}
+	if (
+		typeof data.sessionId !== 'string'
+		|| typeof data.reply !== 'string'
+		|| typeof data.status !== 'string'
+	) {
+		throw new TypeError('chat/turn: 缺少字段');
+	}
+	if (onDelta) {
+		onDelta(data.reply as string);
+	}
+	return {
+		sessionId: data.sessionId as string,
+		status: data.status as ChatTurnResponse['status'],
+		reply: data.reply as string,
+		normalized: (data.normalized ?? null) as ChatTurnResponse['normalized'],
+		missingFields: data.missingFields as string[] | undefined,
+		errors: data.errors as string[] | undefined,
+	};
 }
 
 export function isNormalizedConfig(v: unknown): v is PadExpandNormalized {

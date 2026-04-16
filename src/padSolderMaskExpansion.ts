@@ -2,7 +2,7 @@
  * pad-expand-helper（焊盘外扩）：折线拟合几何；禁止区域或阻焊填充；PCB_Event 连续选中生成。
  */
 
-import type { ChatTurnResponse } from './padExpandAgentClient';
+import type { ChatTurnResponse, PostJsonFn } from './padExpandAgentClient';
 
 import * as extensionConfig from '../extension.json';
 import {
@@ -31,12 +31,19 @@ const IFRAME_SETUP_STORAGE_KEY = 'pad-expand-helper:iframe-setup';
 /** 与 iframe 同步：宿主是否处于连续点选监听（Esc/停止后回写 false，iframe 轮询复位「停止生成」按钮） */
 const IFRAME_LISTENING_ECHO_KEY = 'pad-expand-helper:listening-echo';
 const IFRAME_SESSION_POLL_MS = 120;
+/** chat/start 写存储后给 iframe 一帧渲染时间再轮询 */
+const IFRAME_AFTER_START_SETTLE_MS = 400;
 /** 与文档一致：URI 自扩展根起，可用 `iframe/...` 或 `/iframe/...` */
 const IFRAME_HTML_PATH_PRIMARY = 'iframe/index.html';
 const IFRAME_HTML_PATH_ALT = '/iframe/index.html';
 /** 内联设置窗高度（px）。须与 `iframe/index.html` 实际内容高度接近；过大则底部大块留白，过小易出纵向滚动条。 */
 const IFRAME_SETUP_HEIGHT_PX = 575;
 const IFRAME_WAIT_MAX_MS = 600_000;
+const IFRAME_AGENT_CHAT_ID = 'pad-agent-chat-nl';
+const IFRAME_AGENT_CHAT_PATH = 'iframe/agent-chat.html';
+const IFRAME_AGENT_CHAT_PATH_ALT = '/iframe/agent-chat.html';
+const AGENT_CHAT_STORAGE_KEY = 'pad-expand-helper:agent-chat';
+const IFRAME_AGENT_CHAT_HEIGHT_PX = 536;
 /**
  * 内联设置页详细吐司（openIFrame / 存储 / 解析）。默认关；排障时改 true。
  * 内联 API 为 BETA，见：https://prodocs.lceda.cn/cn/api/reference/pro-api.sys_iframe.openiframe.html
@@ -52,10 +59,353 @@ const PAD_EXP_DEBUG_TOAST_INTERVAL_MS = 800;
 
 const MOUSE_LISTENER_ID = `${extensionConfig.uuid}-pad-exp-mouse`;
 
-/** pad-expand-agent-mvp 默认端口与 README 一致；可通过扩展用户配置键覆盖 */
-const DEFAULT_PAD_EXPAND_AGENT_BASE = 'http://127.0.0.1:8787';
+/**
+ * pad-expand-agent-mvp 服务根地址（前缀，无末尾 `/`）。
+ * 默认当前 ngrok 公网入口；本机直连可改为 `http://127.0.0.1:8787`。
+ * 也可在扩展用户配置键 `padExpandAgentBaseUrl` 覆盖（ngrok 重启子域会变）。
+ */
+const DEFAULT_PAD_EXPAND_AGENT_BASE = 'https://6a5b-121-37-250-62.ngrok-free.app';
 const PAD_EXPAND_AGENT_BASE_CONFIG_KEY = 'padExpandAgentBaseUrl';
+/** 请求头 `X-Agent-Key`，与 pad-expand-agent-mvp 的 `WS_KEY` 一致，默认 nikoyu */
+const PAD_EXPAND_AGENT_SECRET_CONFIG_KEY = 'padExpandAgentSecret';
 const PAD_EXPAND_AGENT_MAX_TURNS = 24;
+/** 连接失败对话框内「返回」正文过长时截断，避免宿主弹窗异常 */
+const AGENT_ERROR_DETAIL_MAX_LEN = 3000;
+
+function truncateForAgentDialog(s: string): string {
+	if (s.length <= AGENT_ERROR_DETAIL_MAX_LEN) {
+		return s;
+	}
+	return `${s.slice(0, AGENT_ERROR_DETAIL_MAX_LEN)}…`;
+}
+
+function trimAgentBaseUrl(b: string): string {
+	return b.trim().replace(/\/$/, '');
+}
+
+/**
+ * 错误提示里展示 HTTP 请求形态（与 pad-expand-agent-mvp JSON API 一致）。
+ */
+function formatAgentChatStartRequest(baseUrl: string): string {
+	const url = `${trimAgentBaseUrl(baseUrl)}/chat/start`;
+	return [
+		`POST ${url}`,
+		`Header: X-Agent-Key: (${PAD_EXPAND_AGENT_SECRET_CONFIG_KEY}，默认 nikoyu)`,
+		'Content-Type: application/json',
+		'Accept: application/json',
+		'ngrok-skip-browser-warning: true',
+		'Body: {}',
+	].join('\n');
+}
+
+function formatAgentChatTurnRequest(baseUrl: string, sessionId: string, input: string): string {
+	const url = `${trimAgentBaseUrl(baseUrl)}/chat/turn`;
+	const bodyObj = { sessionId, input };
+	let bodyLine = JSON.stringify(bodyObj);
+	if (bodyLine.length > 2000) {
+		bodyLine = `${bodyLine.slice(0, 2000)}…`;
+	}
+	return [
+		`POST ${url}`,
+		`Header: X-Agent-Key: (${PAD_EXPAND_AGENT_SECRET_CONFIG_KEY}，默认 nikoyu)`,
+		'Content-Type: application/json',
+		`Body: ${bodyLine}`,
+	].join('\n');
+}
+
+interface AgentChatMsg {
+	role: 'user' | 'assistant';
+	text: string;
+}
+
+function readAgentChatStorageRaw(): string | null {
+	try {
+		const v = eda.sys_Storage.getExtensionUserConfig(AGENT_CHAT_STORAGE_KEY);
+		if (v !== undefined && v !== null) {
+			return typeof v === 'string' ? v : JSON.stringify(v);
+		}
+	}
+	catch {
+		// ignore
+	}
+	try {
+		if (typeof sessionStorage !== 'undefined') {
+			return sessionStorage.getItem(AGENT_CHAT_STORAGE_KEY);
+		}
+	}
+	catch {
+		// ignore
+	}
+	return null;
+}
+
+function writeAgentChatStorage(obj: Record<string, unknown>): void {
+	const s = JSON.stringify(obj);
+	try {
+		sessionStorage.setItem(AGENT_CHAT_STORAGE_KEY, s);
+	}
+	catch {
+		// ignore
+	}
+	try {
+		void eda.sys_Storage.setExtensionUserConfig(AGENT_CHAT_STORAGE_KEY, s);
+	}
+	catch {
+		// ignore
+	}
+}
+
+function clearAgentChatStorage(): void {
+	try {
+		sessionStorage.removeItem(AGENT_CHAT_STORAGE_KEY);
+	}
+	catch {
+		// ignore
+	}
+	try {
+		void eda.sys_Storage.setExtensionUserConfig(AGENT_CHAT_STORAGE_KEY, '');
+	}
+	catch {
+		// ignore
+	}
+}
+
+function writeAgentChatState(partial: Record<string, unknown>): void {
+	let prev: Record<string, unknown> = {};
+	const raw = readAgentChatStorageRaw();
+	if (raw) {
+		try {
+			prev = JSON.parse(raw) as Record<string, unknown>;
+		}
+		catch {
+			// ignore
+		}
+	}
+	const next = { ...prev, ...partial, seq: Number(prev.seq ?? 0) + 1 };
+	writeAgentChatStorage(next);
+}
+
+function appendAgentChatStreamingDelta(delta: string): void {
+	const raw = readAgentChatStorageRaw();
+	let prev = '';
+	if (raw) {
+		try {
+			prev = String((JSON.parse(raw) as { streaming?: string }).streaming ?? '');
+		}
+		catch {
+			prev = '';
+		}
+	}
+	writeAgentChatState({ streaming: prev + delta, phase: 'streaming' });
+}
+
+function readAgentChatMessages(): AgentChatMsg[] {
+	const raw = readAgentChatStorageRaw();
+	if (!raw) {
+		return [];
+	}
+	try {
+		const p = JSON.parse(raw) as { messages?: AgentChatMsg[] };
+		return Array.isArray(p.messages) ? p.messages : [];
+	}
+	catch {
+		return [];
+	}
+}
+
+function clearPendingUserFromAgentChat(): void {
+	writeAgentChatState({ pendingUser: null });
+}
+
+type WaitForAgentChatUserInputResult
+	= { kind: 'ok'; text: string; pendingId: number }
+		| { kind: 'cancelled' }
+		| { kind: 'timeout' };
+
+/**
+ * 只根据存储轮询：用户输入 或 cancelled（用户关窗）。
+ * 不再用 isIFrameAlreadyExist：宿主常误判，导致无故关窗。
+ */
+async function waitForAgentChatUserInput(
+	lastHandledPendingId: number,
+): Promise<WaitForAgentChatUserInputResult> {
+	const t0 = Date.now();
+	while (Date.now() - t0 < IFRAME_WAIT_MAX_MS) {
+		const raw = readAgentChatStorageRaw();
+		if (raw) {
+			try {
+				const p = JSON.parse(raw) as {
+					cancelled?: boolean;
+					pendingUser?: string | null;
+					pendingUserId?: number;
+				};
+				if (p.cancelled) {
+					return { kind: 'cancelled' };
+				}
+				if (
+					p.pendingUserId
+					&& p.pendingUserId !== lastHandledPendingId
+					&& p.pendingUser
+					&& String(p.pendingUser).trim()
+				) {
+					return {
+						kind: 'ok',
+						text: String(p.pendingUser).trim(),
+						pendingId: p.pendingUserId,
+					};
+				}
+			}
+			catch {
+				// ignore
+			}
+		}
+		await sleepMs(IFRAME_SESSION_POLL_MS);
+	}
+	return { kind: 'timeout' };
+}
+
+async function openAgentChatIframe(t: (k: string, ...a: string[]) => string): Promise<boolean> {
+	const sysIframe = eda.sys_IFrame;
+	if (!sysIframe || typeof sysIframe.openIFrame !== 'function') {
+		return false;
+	}
+	writeListeningEcho(false);
+	clearAgentChatStorage();
+	const iframeProps = {
+		title: t('SolderMaskExpAgentChatTitle'),
+		grayscaleMask: true,
+		minimizeButton: false,
+		maximizeButton: false,
+		/** 宿主标题栏关闭等回调：标记 cancelled，由轮询结束会话 */
+		buttonCallbackFn: async () => {
+			writeAgentChatState({ cancelled: true });
+		},
+	};
+	let opened: boolean | undefined;
+	try {
+		opened = await sysIframe.openIFrame(
+			IFRAME_AGENT_CHAT_PATH,
+			420,
+			IFRAME_AGENT_CHAT_HEIGHT_PX,
+			IFRAME_AGENT_CHAT_ID,
+			iframeProps,
+		) as boolean | undefined;
+	}
+	catch {
+		try {
+			opened = await sysIframe.openIFrame(
+				IFRAME_AGENT_CHAT_PATH_ALT,
+				420,
+				IFRAME_AGENT_CHAT_HEIGHT_PX,
+				IFRAME_AGENT_CHAT_ID,
+				iframeProps,
+			) as boolean | undefined;
+		}
+		catch {
+			return false;
+		}
+	}
+	await sleepMs(200);
+	let exists = await sysIframe.isIFrameAlreadyExist(IFRAME_AGENT_CHAT_ID).catch(() => false);
+	for (let retry = 0; !exists && retry < 5; retry++) {
+		await sleepMs(200);
+		exists = await sysIframe.isIFrameAlreadyExist(IFRAME_AGENT_CHAT_ID).catch(() => false);
+	}
+	return opened !== false || exists;
+}
+
+async function runAgentChatIframeSession(
+	t: (k: string, ...a: string[]) => string,
+): Promise<PadExpansionSetupResult | undefined> {
+	const baseUrl = getPadExpandAgentBaseUrl();
+	const postJson = createExtensionPostJson();
+	const sysIframe = eda.sys_IFrame;
+	if (!sysIframe?.openIFrame) {
+		return runAgentDialogPadExpansionSetupAsync(t);
+	}
+	const opened = await openAgentChatIframe(t);
+	if (!opened) {
+		return runAgentDialogPadExpansionSetupAsync(t);
+	}
+	let sessionId = '';
+	let lastHandledPendingId = 0;
+	try {
+		writeAgentChatState({ phase: 'connecting', messages: [], streaming: '', error: null });
+		const start = await chatStart(baseUrl, postJson, (d) => {
+			appendAgentChatStreamingDelta(d);
+		});
+		sessionId = start.sessionId;
+		writeAgentChatState({
+			phase: 'idle',
+			streaming: '',
+			messages: [{ role: 'assistant', text: start.reply }],
+		});
+	}
+	catch (e) {
+		writeAgentChatState({ phase: 'error', error: errorMessage(e), streaming: '' });
+		const reqDesc = formatAgentChatStartRequest(baseUrl);
+		const detail = truncateForAgentDialog(errorMessage(e));
+		const openIframe = await showConfirmationAsync(
+			t('SolderMaskExpAgentUnreachable', reqDesc, detail),
+			t('SolderMaskExpTitle'),
+			t('SolderMaskExpAgentUnreachableFallback'),
+			t('SolderMaskExpAgentUnreachableCancel'),
+		);
+		if (openIframe) {
+			await openPadExpansionSetupIframe(t);
+		}
+		return undefined;
+	}
+	await sleepMs(IFRAME_AFTER_START_SETTLE_MS);
+	for (let turn = 0; turn < PAD_EXPAND_AGENT_MAX_TURNS; turn++) {
+		const pending = await waitForAgentChatUserInput(lastHandledPendingId);
+		if (pending.kind === 'timeout') {
+			return undefined;
+		}
+		if (pending.kind === 'cancelled') {
+			clearAgentChatStorage();
+			return undefined;
+		}
+		lastHandledPendingId = pending.pendingId;
+		clearPendingUserFromAgentChat();
+		const userText = pending.text;
+		const prevMsgs = readAgentChatMessages();
+		writeAgentChatState({
+			messages: [...prevMsgs, { role: 'user', text: userText }],
+			streaming: '',
+			phase: 'streaming',
+		});
+		let res: ChatTurnResponse;
+		try {
+			res = await chatTurn(baseUrl, sessionId, userText, postJson, (d) => {
+				appendAgentChatStreamingDelta(d);
+			});
+		}
+		catch (e) {
+			writeAgentChatState({ phase: 'error', error: errorMessage(e), streaming: '' });
+			const reqDesc = formatAgentChatTurnRequest(baseUrl, sessionId, userText);
+			const detail = truncateForAgentDialog(errorMessage(e));
+			eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentRequestFailed', reqDesc, detail), t('SolderMaskExpTitle'));
+			return undefined;
+		}
+		const msgs = [...readAgentChatMessages(), { role: 'assistant' as const, text: res.reply }];
+		writeAgentChatState({
+			phase: 'idle',
+			streaming: '',
+			messages: msgs,
+		});
+		if (res.status === 'completed' && res.normalized && isNormalizedConfig(res.normalized)) {
+			const norm = res.normalized;
+			return {
+				outputKind: norm.outputKind,
+				expMil: norm.expMil,
+				continuous: norm.continuous,
+			};
+		}
+	}
+	eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentTooManyTurns'), t('SolderMaskExpTitle'));
+	return undefined;
+}
 
 export type PadExpansionOutputKind = 'forbidden_pour' | 'forbidden_fill' | 'solder_mask';
 
@@ -1856,6 +2206,49 @@ function getPadExpandAgentBaseUrl(): string {
 	return DEFAULT_PAD_EXPAND_AGENT_BASE;
 }
 
+function getPadExpandAgentSecret(): string {
+	try {
+		const raw = eda.sys_Storage.getExtensionUserConfig(PAD_EXPAND_AGENT_SECRET_CONFIG_KEY);
+		if (typeof raw === 'string' && raw.trim()) {
+			return raw.trim();
+		}
+	}
+	catch {
+		// ignore
+	}
+	return 'nikoyu';
+}
+
+/**
+ * 扩展内禁止 `fetch`，使用 {@link eda.sys_ClientUrl.request}；携带 `X-Agent-Key` 与 pad-expand-agent-mvp 对齐。
+ */
+function createExtensionPostJson(): PostJsonFn {
+	const headers = {
+		'content-type': 'application/json; charset=utf-8',
+		'accept': 'application/json',
+		'ngrok-skip-browser-warning': 'true',
+		'x-agent-key': getPadExpandAgentSecret(),
+	};
+	type RequestFn = (
+		url: string,
+		method?: 'POST',
+		data?: string,
+		options?: { headers?: Record<string, string> },
+	) => Promise<Response>;
+	return async (url, jsonBody) => {
+		const raw = eda.sys_ClientUrl as unknown;
+		if (typeof raw === 'function') {
+			const Ctor = raw as new (extensionUuid?: string) => { request: RequestFn };
+			const client = new Ctor(extensionConfig.uuid);
+			return client.request(url, 'POST', jsonBody, { headers });
+		}
+		if (raw && typeof raw === 'object' && 'request' in raw && typeof (raw as { request: unknown }).request === 'function') {
+			return (raw as { request: RequestFn }).request(url, 'POST', jsonBody, { headers });
+		}
+		throw new Error('sys_ClientUrl 不可用');
+	};
+}
+
 /** 自然语言输入（宿主需支持 text 类型输入框；否则可能退化为单行） */
 function showNaturalLanguageInputDialogAsync(
 	before: string,
@@ -2239,7 +2632,8 @@ async function parseApplyRecord(
 	};
 }
 
-async function runFallbackChainExecute(t: (k: string, ...a: string[]) => string): Promise<void> {
+/** iframe 打不开时的最后回退：多段对话框 */
+async function runDialogOnlyFallbackExecute(t: (k: string, ...a: string[]) => string): Promise<void> {
 	const setup = await padExpansionSetupFallbackAsync(t);
 	if (setup === undefined) {
 		return;
@@ -2359,11 +2753,11 @@ async function runIframeSetupSessionLoop(
  * @see https://prodocs.lceda.cn/cn/api/guide/inline-frame.html
  * @see https://prodocs.lceda.cn/cn/api/reference/pro-api.sys_iframe.openiframe.html
  */
-async function _openPadExpansionSetupIframe(t: (k: string, ...a: string[]) => string): Promise<void> {
+async function openPadExpansionSetupIframe(t: (k: string, ...a: string[]) => string): Promise<void> {
 	const sysIframe = eda.sys_IFrame;
 	if (!sysIframe || typeof sysIframe.openIFrame !== 'function') {
 		toastIframeSetupVerbose('sys_IFrame.openIFrame 不可用，走回退对话框');
-		await runFallbackChainExecute(t);
+		await runDialogOnlyFallbackExecute(t);
 		return;
 	}
 	writeListeningEcho(false);
@@ -2425,7 +2819,7 @@ async function _openPadExpansionSetupIframe(t: (k: string, ...a: string[]) => st
 		catch (e2) {
 			padExpDebugLog('openIFrame-alt-throw', e2);
 			toastIframeSetupVerbose(`openIFrame 异常: ${errorMessage(e2)}`);
-			await runFallbackChainExecute(t);
+			await runDialogOnlyFallbackExecute(t);
 			return;
 		}
 	}
@@ -2510,21 +2904,27 @@ async function runAgentDialogPadExpansionSetupAsync(
 	t: (k: string, ...a: string[]) => string,
 ): Promise<PadExpansionSetupResult | undefined> {
 	const baseUrl = getPadExpandAgentBaseUrl();
+	const postJson = createExtensionPostJson();
 	let sessionId: string;
 	let lastReply: string;
 	try {
-		const start = await chatStart(baseUrl);
+		const start = await chatStart(baseUrl, postJson);
 		sessionId = start.sessionId;
 		lastReply = start.reply;
 	}
 	catch (e) {
-		const useFallback = await showConfirmationAsync(
-			t('SolderMaskExpAgentUnreachable', errorMessage(e)),
+		const reqDesc = formatAgentChatStartRequest(baseUrl);
+		const detail = truncateForAgentDialog(errorMessage(e));
+		const openIframe = await showConfirmationAsync(
+			t('SolderMaskExpAgentUnreachable', reqDesc, detail),
 			t('SolderMaskExpTitle'),
 			t('SolderMaskExpAgentUnreachableFallback'),
 			t('SolderMaskExpAgentUnreachableCancel'),
 		);
-		return useFallback ? padExpansionSetupFallbackAsync(t) : undefined;
+		if (openIframe) {
+			await openPadExpansionSetupIframe(t);
+		}
+		return undefined;
 	}
 
 	for (let n = 0; n < PAD_EXPAND_AGENT_MAX_TURNS; n++) {
@@ -2546,10 +2946,12 @@ async function runAgentDialogPadExpansionSetupAsync(
 		}
 		let res: ChatTurnResponse;
 		try {
-			res = await chatTurn(baseUrl, sessionId, trimmed);
+			res = await chatTurn(baseUrl, sessionId, trimmed, postJson);
 		}
 		catch (e) {
-			eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentRequestFailed', errorMessage(e)), t('SolderMaskExpTitle'));
+			const reqDesc = formatAgentChatTurnRequest(baseUrl, sessionId, trimmed);
+			const detail = truncateForAgentDialog(errorMessage(e));
+			eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentRequestFailed', reqDesc, detail), t('SolderMaskExpTitle'));
 			return undefined;
 		}
 		lastReply = res.reply;
@@ -2567,7 +2969,7 @@ async function runAgentDialogPadExpansionSetupAsync(
 }
 
 async function runPadExpansionFlowWithAgent(t: (k: string, ...a: string[]) => string): Promise<void> {
-	const setup = await runAgentDialogPadExpansionSetupAsync(t);
+	const setup = await runAgentChatIframeSession(t);
 	if (setup === undefined) {
 		return;
 	}

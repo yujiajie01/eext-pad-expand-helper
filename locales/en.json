@@ -33,13 +33,14 @@
 	"SolderMaskExpNoShapeForSolderMask": "Special pad stack produced no solder-mask side to draw; skipped",
 	"SolderMaskExpFinalizeRegionFailed": "convert to forbidden region failed (solder-mask fill removed if possible)",
 	"SolderMaskExpFailed": "Error: ${1}",
-	"SolderMaskExpAgentUnreachable": "Cannot reach local assistant (${1}). Start pad-expand-agent-mvp on this machine (default http://127.0.0.1:8787 , bun run dev).",
-	"SolderMaskExpAgentUnreachableFallback": "Classic setup",
+	"SolderMaskExpAgentUnreachable": "Cannot connect to agent.\nRequest (must be POST; opening the path in the browser bar uses GET and 404s):\n${1}\nResponse: ${2}",
+	"SolderMaskExpAgentUnreachableFallback": "Open inline setup (single page)",
 	"SolderMaskExpAgentUnreachableCancel": "Cancel",
 	"SolderMaskExpAgentInputHint": "Describe your request in natural language (e.g. solder mask, expand 0.1mm, continuous). If the assistant says parameters are ready, reply \"confirm\".",
 	"SolderMaskExpAgentInputAfter": "You may add more turns; when parameters are complete, reply \"confirm\" to finish.",
+	"SolderMaskExpAgentChatTitle": "pad-expand — chat",
 	"SolderMaskExpAgentDialogTitle": "Natural language — pad expand",
 	"SolderMaskExpAgentEmptyInput": "Please enter something.",
-	"SolderMaskExpAgentRequestFailed": "Request failed: ${1}",
+	"SolderMaskExpAgentRequestFailed": "Request failed.\nRequest:\n${1}\nResponse: ${2}",
 	"SolderMaskExpAgentTooManyTurns": "Too many turns. Close and run the menu command again."
 }
