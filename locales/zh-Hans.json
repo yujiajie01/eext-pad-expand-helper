@@ -32,5 +32,14 @@
 	"SolderMaskExpNoSolderMaskLayer": "当前焊盘电气层无法对应顶层/底层阻焊（例如内层焊盘），已跳过",
 	"SolderMaskExpNoShapeForSolderMask": "特殊焊盘分层未产生可绘制的阻焊侧，已跳过",
 	"SolderMaskExpFinalizeRegionFailed": "转为禁止区域失败（已尝试删除阻焊填充）",
-	"SolderMaskExpFailed": "执行失败：${1}"
+	"SolderMaskExpFailed": "执行失败：${1}",
+	"SolderMaskExpAgentUnreachable": "无法连接本地助手（${1}）。请在本机启动 pad-expand-agent-mvp（默认 http://127.0.0.1:8787 ， bun run dev）。",
+	"SolderMaskExpAgentUnreachableFallback": "传统设置",
+	"SolderMaskExpAgentUnreachableCancel": "取消",
+	"SolderMaskExpAgentInputHint": "请用自然语言描述需求（例：阻焊区域，外扩 0.1mm，连续生成）。参数已齐时可回复「确认」。",
+	"SolderMaskExpAgentInputAfter": "可多轮补充；助手确认参数后，再回复「确认」即可完成。",
+	"SolderMaskExpAgentDialogTitle": "自然语言 — 焊盘外扩",
+	"SolderMaskExpAgentEmptyInput": "请输入内容",
+	"SolderMaskExpAgentRequestFailed": "请求失败：${1}",
+	"SolderMaskExpAgentTooManyTurns": "对话轮数过多，请关闭对话框后重新运行菜单命令。"
 }

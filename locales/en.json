@@ -32,5 +32,14 @@
 	"SolderMaskExpNoSolderMaskLayer": "Pad layer does not map to top/bottom solder mask (e.g. inner-layer pad); skipped",
 	"SolderMaskExpNoShapeForSolderMask": "Special pad stack produced no solder-mask side to draw; skipped",
 	"SolderMaskExpFinalizeRegionFailed": "convert to forbidden region failed (solder-mask fill removed if possible)",
-	"SolderMaskExpFailed": "Error: ${1}"
+	"SolderMaskExpFailed": "Error: ${1}",
+	"SolderMaskExpAgentUnreachable": "Cannot reach local assistant (${1}). Start pad-expand-agent-mvp on this machine (default http://127.0.0.1:8787 , bun run dev).",
+	"SolderMaskExpAgentUnreachableFallback": "Classic setup",
+	"SolderMaskExpAgentUnreachableCancel": "Cancel",
+	"SolderMaskExpAgentInputHint": "Describe your request in natural language (e.g. solder mask, expand 0.1mm, continuous). If the assistant says parameters are ready, reply \"confirm\".",
+	"SolderMaskExpAgentInputAfter": "You may add more turns; when parameters are complete, reply \"confirm\" to finish.",
+	"SolderMaskExpAgentDialogTitle": "Natural language — pad expand",
+	"SolderMaskExpAgentEmptyInput": "Please enter something.",
+	"SolderMaskExpAgentRequestFailed": "Request failed: ${1}",
+	"SolderMaskExpAgentTooManyTurns": "Too many turns. Close and run the menu command again."
 }

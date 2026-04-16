@@ -2,7 +2,14 @@
  * pad-expand-helper（焊盘外扩）：折线拟合几何；禁止区域或阻焊填充；PCB_Event 连续选中生成。
  */
 
+import type { ChatTurnResponse } from './padExpandAgentClient';
+
 import * as extensionConfig from '../extension.json';
+import {
+	chatStart,
+	chatTurn,
+	isNormalizedConfig,
+} from './padExpandAgentClient';
 
 const LAYER_TOP = EPCB_LayerId.TOP;
 const LAYER_BOTTOM = EPCB_LayerId.BOTTOM;
@@ -44,6 +51,11 @@ const PAD_EXP_DEBUG = false;
 const PAD_EXP_DEBUG_TOAST_INTERVAL_MS = 800;
 
 const MOUSE_LISTENER_ID = `${extensionConfig.uuid}-pad-exp-mouse`;
+
+/** pad-expand-agent-mvp 默认端口与 README 一致；可通过扩展用户配置键覆盖 */
+const DEFAULT_PAD_EXPAND_AGENT_BASE = 'http://127.0.0.1:8787';
+const PAD_EXPAND_AGENT_BASE_CONFIG_KEY = 'padExpandAgentBaseUrl';
+const PAD_EXPAND_AGENT_MAX_TURNS = 24;
 
 export type PadExpansionOutputKind = 'forbidden_pour' | 'forbidden_fill' | 'solder_mask';
 
@@ -1828,6 +1840,42 @@ function showInputDialogAsync(
 	});
 }
 
+function getPadExpandAgentBaseUrl(): string {
+	try {
+		const raw = eda.sys_Storage.getExtensionUserConfig(PAD_EXPAND_AGENT_BASE_CONFIG_KEY);
+		if (typeof raw === 'string') {
+			const trimmed = raw.trim();
+			if (/^https?:\/\//i.test(trimmed)) {
+				return trimmed.replace(/\/$/, '');
+			}
+		}
+	}
+	catch {
+		// ignore
+	}
+	return DEFAULT_PAD_EXPAND_AGENT_BASE;
+}
+
+/** 自然语言输入（宿主需支持 text 类型输入框；否则可能退化为单行） */
+function showNaturalLanguageInputDialogAsync(
+	before: string,
+	after: string,
+	title: string,
+	defaultInput: string,
+): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		eda.sys_Dialog.showInputDialog(
+			before,
+			after,
+			title,
+			'text' as never,
+			defaultInput,
+			{ placeholder: defaultInput },
+			resolve,
+		);
+	});
+}
+
 function showConfirmationAsync(
 	content: string,
 	title: string,
@@ -2311,7 +2359,7 @@ async function runIframeSetupSessionLoop(
  * @see https://prodocs.lceda.cn/cn/api/guide/inline-frame.html
  * @see https://prodocs.lceda.cn/cn/api/reference/pro-api.sys_iframe.openiframe.html
  */
-async function openPadExpansionSetupIframe(t: (k: string, ...a: string[]) => string): Promise<void> {
+async function _openPadExpansionSetupIframe(t: (k: string, ...a: string[]) => string): Promise<void> {
 	const sysIframe = eda.sys_IFrame;
 	if (!sysIframe || typeof sysIframe.openIFrame !== 'function') {
 		toastIframeSetupVerbose('sys_IFrame.openIFrame 不可用，走回退对话框');
@@ -2458,6 +2506,82 @@ async function runOneShotPadExpansion(
 	);
 }
 
+async function runAgentDialogPadExpansionSetupAsync(
+	t: (k: string, ...a: string[]) => string,
+): Promise<PadExpansionSetupResult | undefined> {
+	const baseUrl = getPadExpandAgentBaseUrl();
+	let sessionId: string;
+	let lastReply: string;
+	try {
+		const start = await chatStart(baseUrl);
+		sessionId = start.sessionId;
+		lastReply = start.reply;
+	}
+	catch (e) {
+		const useFallback = await showConfirmationAsync(
+			t('SolderMaskExpAgentUnreachable', errorMessage(e)),
+			t('SolderMaskExpTitle'),
+			t('SolderMaskExpAgentUnreachableFallback'),
+			t('SolderMaskExpAgentUnreachableCancel'),
+		);
+		return useFallback ? padExpansionSetupFallbackAsync(t) : undefined;
+	}
+
+	for (let n = 0; n < PAD_EXPAND_AGENT_MAX_TURNS; n++) {
+		const before = `${lastReply}\n\n${t('SolderMaskExpAgentInputHint')}`;
+		const after = t('SolderMaskExpAgentInputAfter');
+		const input = await showNaturalLanguageInputDialogAsync(
+			before,
+			after,
+			t('SolderMaskExpAgentDialogTitle'),
+			'',
+		);
+		if (input === undefined) {
+			return undefined;
+		}
+		const trimmed = input.trim();
+		if (trimmed.length === 0) {
+			eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentEmptyInput'), t('SolderMaskExpTitle'));
+			continue;
+		}
+		let res: ChatTurnResponse;
+		try {
+			res = await chatTurn(baseUrl, sessionId, trimmed);
+		}
+		catch (e) {
+			eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentRequestFailed', errorMessage(e)), t('SolderMaskExpTitle'));
+			return undefined;
+		}
+		lastReply = res.reply;
+		if (res.status === 'completed' && res.normalized && isNormalizedConfig(res.normalized)) {
+			const norm = res.normalized;
+			return {
+				outputKind: norm.outputKind,
+				expMil: norm.expMil,
+				continuous: norm.continuous,
+			};
+		}
+	}
+	eda.sys_Dialog.showInformationMessage(t('SolderMaskExpAgentTooManyTurns'), t('SolderMaskExpTitle'));
+	return undefined;
+}
+
+async function runPadExpansionFlowWithAgent(t: (k: string, ...a: string[]) => string): Promise<void> {
+	const setup = await runAgentDialogPadExpansionSetupAsync(t);
+	if (setup === undefined) {
+		return;
+	}
+	const settings: PadExpansionSettings = { outputKind: setup.outputKind, expMil: setup.expMil };
+	if (setup.continuous) {
+		activeInteractiveSettings = settings;
+		registerInteractiveMouseListener(t);
+		padExpIframeListeningRegistered = true;
+	}
+	else {
+		await runOneShotPadExpansion(t, settings);
+	}
+}
+
 export async function runPadSolderMaskExpansion(): Promise<void> {
 	const t = (key: string, ...args: string[]) => eda.sys_I18n.text(key, undefined, undefined, ...args);
 	stopInteractiveMode();
@@ -2468,7 +2592,7 @@ export async function runPadSolderMaskExpansion(): Promise<void> {
 			eda.sys_Dialog.showConfirmationMessage(t('SolderMaskExpNeedPcb'), t('SolderMaskExpTitle'));
 			return;
 		}
-		await openPadExpansionSetupIframe(t);
+		await runPadExpansionFlowWithAgent(t);
 	}
 	catch (err) {
 		eda.sys_Dialog.showConfirmationMessage(
