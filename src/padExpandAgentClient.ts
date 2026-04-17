@@ -28,7 +28,7 @@ function trimBaseUrl(baseUrl: string): string {
 	return baseUrl.trim().replace(/\/$/, '');
 }
 
-export type PostJsonFn = (url: string, jsonBody: string) => Promise<Response>;
+export type PostJsonFn = (url: string, jsonBody: string, headers?: Record<string, string>) => Promise<Response>;
 
 function throwHttpJsonError(res: Response, bodyText: string): never {
 	let parsed: { error?: unknown };
@@ -50,7 +50,8 @@ export async function chatStart(
 	onDelta?: (chunk: string) => void,
 ): Promise<ChatStartResponse> {
 	const url = `${trimBaseUrl(baseUrl)}/chat/start`;
-	const res = await postJson(url, '{}');
+	const requestId = crypto.randomUUID();
+	const res = await postJson(url, '{}', { 'X-Request-Id': requestId });
 	const text = await res.text();
 	if (!res.ok) {
 		throwHttpJsonError(res, text);
@@ -81,7 +82,8 @@ export async function chatTurn(
 	onDelta?: (chunk: string) => void,
 ): Promise<ChatTurnResponse> {
 	const url = `${trimBaseUrl(baseUrl)}/chat/turn`;
-	const res = await postJson(url, JSON.stringify({ sessionId, input }));
+	const requestId = crypto.randomUUID();
+	const res = await postJson(url, JSON.stringify({ sessionId, input }), { 'X-Request-Id': requestId });
 	const text = await res.text();
 	if (!res.ok) {
 		throwHttpJsonError(res, text);

@@ -2235,15 +2235,16 @@ function createExtensionPostJson(): PostJsonFn {
 		data?: string,
 		options?: { headers?: Record<string, string> },
 	) => Promise<Response>;
-	return async (url, jsonBody) => {
+	return async (url, jsonBody, extraHeaders) => {
+		const mergedHeaders = extraHeaders ? { ...headers, ...extraHeaders } : headers;
 		const raw = eda.sys_ClientUrl as unknown;
 		if (typeof raw === 'function') {
 			const Ctor = raw as new (extensionUuid?: string) => { request: RequestFn };
 			const client = new Ctor(extensionConfig.uuid);
-			return client.request(url, 'POST', jsonBody, { headers });
+			return client.request(url, 'POST', jsonBody, { headers: mergedHeaders });
 		}
 		if (raw && typeof raw === 'object' && 'request' in raw && typeof (raw as { request: unknown }).request === 'function') {
-			return (raw as { request: RequestFn }).request(url, 'POST', jsonBody, { headers });
+			return (raw as { request: RequestFn }).request(url, 'POST', jsonBody, { headers: mergedHeaders });
 		}
 		throw new Error('sys_ClientUrl 不可用');
 	};
